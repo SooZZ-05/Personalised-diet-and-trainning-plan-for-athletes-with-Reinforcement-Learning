@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # --- Stable-Baselines3 / Gymnasium imports ---
 try:
@@ -271,74 +272,43 @@ class AthleteEnvWrapper(gym.Wrapper):
 # Utilities
 # =============================
 @st.cache_resource(show_spinner=False)
-def load_model(model_path: str):
-    try:
-        model = PPO.load(model_path, device="cpu")
-        return model
-    except Exception as e:
-        st.exception(e)
-        st.stop()
+@st.cache_resource(show_spinner=False)
+def load_model_and_env(model_path: str, norm_path: str):
+    # Load PPO policy
+    model = PPO.load(model_path, device="cpu")
 
-# def simulate_days(model, days=30, seed=None):
-#     """Rollout a full episode deterministically using the PPO model"""
-#     base_env = AthleteEnv(render_mode=None)
-#     base_env.episode_length = int(days)
-#     env = AthleteEnvWrapper(base_env)
-#     if seed is not None:
-#         np.random.seed(seed)
-#     obs, info = env.reset(seed=seed)
-#     records = []
-#     day = 1
-#     seg_map = {0:"Morning", 1:"Midday", 2:"Evening"}
-#     food_names = base_env.food_df['name'].to_dict()
-#     ex_names = base_env.exercise_df['name'].to_dict()
+    # Rebuild the env stack the policy expects for inference
+    def make_env():
+        # Same observation flattening/action space as training
+        return AthleteEnvWrapper(AthleteEnv(render_mode=None))
 
-#     for t in range(days*3):
-#         action, _ = model.predict(obs, deterministic=True)
-#         obs, reward, terminated, truncated, info = env.step(action)
-#         # decode for logging
-#         meal = list(map(int, action[:5]))
-#         exercise = int(action[5])
-#         sleep_idx = int(action[6])
-#         sleep_hours = float(env.sleep_bins[sleep_idx])
-#         # before step: which segment?
-#         # we need to peek from base_env.state["next_segment"]
-#         seg = int(base_env.state["next_segment"])
-#         seg_name = seg_map[seg]
+    venv = DummyVecEnv([make_env])
 
-#         obs, reward, terminated, truncated, info = env.step(action)
+    # Load VecNormalize statistics (very important!)
+    if os.path.exists(norm_path):
+        venv = VecNormalize.load(norm_path, venv)
+        venv.training = False       # do not update running stats
+        venv.norm_reward = False    # keep rewards unnormalized at test time
+    else:
+        st.warning(f"VecNormalize stats not found: {norm_path}. "
+                   "Predictions may be off because observations aren’t normalized.")
 
-#         row = {
-#             "t": t,
-#             "day": (t // 3) + 1,
-#             "segment": seg_name,
-#             "weight": float(base_env.state["weight"][0]),
-#             "calories_today": float(base_env.state["calories_today"][0]),
-#             "satiety": float(base_env.state["satiety_level"][0]),
-#             "fatigue": float(base_env.state["fatigue_level"][0]),
-#             "sleep_hours": float(base_env.state["sleep_hours"][0]),
-#             "days_since_rest": int(base_env.state["days_since_rest"]),
-#             "reward": float(reward),
-#             "meal_items": ", ".join([food_names[i+1] for i in meal]),
-#             "exercise": ex_names[exercise+1] if seg_name=="Morning" else "-",
-#             "sleep_planned": sleep_hours if seg_name=="Evening" else 0.0,
-#             "target_weight": float(base_env.target_weight),
-#         }
-#         records.append(row)
-#         if truncated: 
-#             break
-#     df = pd.DataFrame(records)
-#     return df
+    return model, venv
 
-def simulate_days(model, days=30, seed=None):
-    """Rollout a full episode deterministically using the PPO model"""
-    base_env = AthleteEnv(render_mode=None)
-    base_env.episode_length = int(days)   # allow up to 'days'
-    env = AthleteEnvWrapper(base_env)
+def simulate_days(model, venv, days=30, seed=None):
+    """
+    Roll out a full episode deterministically with the PPO model
+    on a vectorized, VecNormalize-wrapped env. We log from the underlying
+    base AthleteEnv for human-readable metrics.
+    """
+    # Access the underlying single env for logging:
+    # venv -> DummyVecEnv -> AthleteEnvWrapper -> AthleteEnv
+    wrapper = venv.envs[0]          # AthleteEnvWrapper
+    base_env = wrapper.env          # AthleteEnv
+    base_env.episode_length = int(days)
 
-    if seed is not None:
-        np.random.seed(seed)
-    obs, info = env.reset(seed=seed)
+    # Reset vec env (returns shape (n_envs, obs_dim))
+    obs = venv.reset(seed=seed)
 
     records = []
     seg_map = {0: "Morning", 1: "Midday", 2: "Evening"}
@@ -346,19 +316,29 @@ def simulate_days(model, days=30, seed=None):
     ex_names = base_env.exercise_df['name'].to_dict()
 
     for t in range(days * 3):
-        # which segment we're about to act in (log BEFORE stepping)
+        # Log current segment *before* stepping
         seg = int(base_env.state["next_segment"])
         seg_name = seg_map[seg]
 
+        # Predict action (robust to shape)
         action, _ = model.predict(obs, deterministic=True)
-        meal = list(map(int, action[:5]))
-        exercise = int(action[5])
-        sleep_idx = int(action[6])
-        sleep_hours = float(env.sleep_bins[sleep_idx])
+        act0 = action if np.ndim(action) == 1 else action[0]
 
-        # single environment step
-        obs, reward, terminated, truncated, info = env.step(action)
+        # Decode for logging
+        meal = list(map(int, act0[:5]))
+        exercise = int(act0[5])
+        sleep_idx = int(act0[6])
+        sleep_hours = float(wrapper.sleep_bins[sleep_idx])
 
+        # Step vec env
+        obs, reward, terminated, truncated, _ = venv.step(action)
+
+        # VecEnv returns arrays
+        r0 = float(reward[0]) if np.ndim(reward) else float(reward)
+        done = (bool(terminated[0]) if np.ndim(terminated) else bool(terminated)) or \
+               (bool(truncated[0]) if np.ndim(truncated) else bool(truncated))
+
+        # Log from base_env
         records.append({
             "t": t,
             "day": (t // 3) + 1,
@@ -369,17 +349,18 @@ def simulate_days(model, days=30, seed=None):
             "fatigue": float(base_env.state["fatigue_level"][0]),
             "sleep_hours": float(base_env.state["sleep_hours"][0]),
             "days_since_rest": int(base_env.state["days_since_rest"]),
-            "reward": float(reward),
+            "reward": r0,
             "meal_items": ", ".join([food_names[i+1] for i in meal]),
             "exercise": ex_names[exercise+1] if seg_name == "Morning" else "-",
             "sleep_planned": sleep_hours if seg_name == "Evening" else 0.0,
             "target_weight": float(base_env.target_weight),
         })
 
-        if terminated or truncated:
+        if done:
             break
 
     return pd.DataFrame(records)
+
 
 # =============================
 # Streamlit UI
@@ -389,19 +370,30 @@ st.set_page_config(page_title="Athlete Diet & Training — PPO Simulator", layou
 st.title("🏃‍♂️ Athlete Diet & Training (PPO) — Day-by-Day Animation")
 st.caption("Visualize the athlete's status after meals and training across days using the **final PPO model**.")
 
-# Sidebar — Model file
 st.sidebar.header("Model")
-default_model_path = st.sidebar.text_input("PPO model path (.zip)", "athlete_ppo_model.zip",
-                                           help="Upload the final PPO model with Stable-Baselines3 format.")
-uploaded = st.sidebar.file_uploader("...or upload model file", type=["zip"])
+default_model_path = st.sidebar.text_input(
+    "PPO model path (.zip)", "ppo_advanced/final_advanced_model.zip",
+    help="Path to the *advanced* PPO model saved in the notebook."
+)
+default_norm_path = st.sidebar.text_input(
+    "VecNormalize stats (.pkl)", "ppo_advanced/vec_normalize.pkl",
+    help="Path to the VecNormalize statistics saved during training."
+)
+
+uploaded = st.sidebar.file_uploader("...or upload PPO model (.zip)", type=["zip"])
+uploaded_norm = st.sidebar.file_uploader("...or upload VecNormalize (.pkl)", type=["pkl"])
 
 model_path = default_model_path
 if uploaded is not None:
-    # Save uploaded model to a temp path for SB3 to load
     model_path = os.path.join("/tmp", uploaded.name)
     with open(model_path, "wb") as f:
         f.write(uploaded.getbuffer())
 
+norm_path = default_norm_path
+if uploaded_norm is not None:
+    norm_path = os.path.join("/tmp", uploaded_norm.name)
+    with open(norm_path, "wb") as f:
+        f.write(uploaded_norm.getbuffer())
 # Controls
 st.sidebar.header("Simulation")
 days = st.sidebar.slider("Days to simulate", min_value=7, max_value=60, value=30, step=1)
@@ -416,11 +408,12 @@ if "frame" not in st.session_state:
 if "playing" not in st.session_state:
     st.session_state.playing = False
 
-# Load and simulate
 if run_btn:
-    model = load_model(model_path)
+    model, venv = load_model_and_env(model_path, norm_path)
     with st.spinner("Simulating..."):
-        st.session_state.df = simulate_days(model, days=days, seed=int(seed) if seed else None)
+        st.session_state.df = simulate_days(
+            model, venv, days=days, seed=int(seed) if seed else None
+        )
         st.session_state.frame = 0
         st.session_state.playing = True
 
