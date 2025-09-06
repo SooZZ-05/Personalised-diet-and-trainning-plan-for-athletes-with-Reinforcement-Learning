@@ -279,36 +279,87 @@ def load_model(model_path: str):
         st.exception(e)
         st.stop()
 
+# def simulate_days(model, days=30, seed=None):
+#     """Rollout a full episode deterministically using the PPO model"""
+#     base_env = AthleteEnv(render_mode=None)
+#     base_env.episode_length = int(days)
+#     env = AthleteEnvWrapper(base_env)
+#     if seed is not None:
+#         np.random.seed(seed)
+#     obs, info = env.reset(seed=seed)
+#     records = []
+#     day = 1
+#     seg_map = {0:"Morning", 1:"Midday", 2:"Evening"}
+#     food_names = base_env.food_df['name'].to_dict()
+#     ex_names = base_env.exercise_df['name'].to_dict()
+
+#     for t in range(days*3):
+#         action, _ = model.predict(obs, deterministic=True)
+#         obs, reward, terminated, truncated, info = env.step(action)
+#         # decode for logging
+#         meal = list(map(int, action[:5]))
+#         exercise = int(action[5])
+#         sleep_idx = int(action[6])
+#         sleep_hours = float(env.sleep_bins[sleep_idx])
+#         # before step: which segment?
+#         # we need to peek from base_env.state["next_segment"]
+#         seg = int(base_env.state["next_segment"])
+#         seg_name = seg_map[seg]
+
+#         obs, reward, terminated, truncated, info = env.step(action)
+
+#         row = {
+#             "t": t,
+#             "day": (t // 3) + 1,
+#             "segment": seg_name,
+#             "weight": float(base_env.state["weight"][0]),
+#             "calories_today": float(base_env.state["calories_today"][0]),
+#             "satiety": float(base_env.state["satiety_level"][0]),
+#             "fatigue": float(base_env.state["fatigue_level"][0]),
+#             "sleep_hours": float(base_env.state["sleep_hours"][0]),
+#             "days_since_rest": int(base_env.state["days_since_rest"]),
+#             "reward": float(reward),
+#             "meal_items": ", ".join([food_names[i+1] for i in meal]),
+#             "exercise": ex_names[exercise+1] if seg_name=="Morning" else "-",
+#             "sleep_planned": sleep_hours if seg_name=="Evening" else 0.0,
+#             "target_weight": float(base_env.target_weight),
+#         }
+#         records.append(row)
+#         if truncated: 
+#             break
+#     df = pd.DataFrame(records)
+#     return df
+
 def simulate_days(model, days=30, seed=None):
     """Rollout a full episode deterministically using the PPO model"""
     base_env = AthleteEnv(render_mode=None)
-    base_env.episode_length = int(days)
+    base_env.episode_length = int(days)   # allow up to 'days'
     env = AthleteEnvWrapper(base_env)
+
     if seed is not None:
         np.random.seed(seed)
     obs, info = env.reset(seed=seed)
+
     records = []
-    day = 1
-    seg_map = {0:"Morning", 1:"Midday", 2:"Evening"}
+    seg_map = {0: "Morning", 1: "Midday", 2: "Evening"}
     food_names = base_env.food_df['name'].to_dict()
     ex_names = base_env.exercise_df['name'].to_dict()
 
-    for t in range(days*3):
+    for t in range(days * 3):
+        # which segment we're about to act in (log BEFORE stepping)
+        seg = int(base_env.state["next_segment"])
+        seg_name = seg_map[seg]
+
         action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        # decode for logging
         meal = list(map(int, action[:5]))
         exercise = int(action[5])
         sleep_idx = int(action[6])
         sleep_hours = float(env.sleep_bins[sleep_idx])
-        # before step: which segment?
-        # we need to peek from base_env.state["next_segment"]
-        seg = int(base_env.state["next_segment"])
-        seg_name = seg_map[seg]
 
+        # single environment step
         obs, reward, terminated, truncated, info = env.step(action)
 
-        row = {
+        records.append({
             "t": t,
             "day": (t // 3) + 1,
             "segment": seg_name,
@@ -320,15 +371,15 @@ def simulate_days(model, days=30, seed=None):
             "days_since_rest": int(base_env.state["days_since_rest"]),
             "reward": float(reward),
             "meal_items": ", ".join([food_names[i+1] for i in meal]),
-            "exercise": ex_names[exercise+1] if seg_name=="Morning" else "-",
-            "sleep_planned": sleep_hours if seg_name=="Evening" else 0.0,
+            "exercise": ex_names[exercise+1] if seg_name == "Morning" else "-",
+            "sleep_planned": sleep_hours if seg_name == "Evening" else 0.0,
             "target_weight": float(base_env.target_weight),
-        }
-        records.append(row)
-        if truncated: 
+        })
+
+        if terminated or truncated:
             break
-    df = pd.DataFrame(records)
-    return df
+
+    return pd.DataFrame(records)
 
 # =============================
 # Streamlit UI
