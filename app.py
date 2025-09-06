@@ -511,7 +511,7 @@ def simulate_days(model, venv, days=30, seed=None):
 # =============================
 # Streamlit UI
 # =============================
-st.set_page_config(page_title="Athlete Diet & Training — PPO", layout="wide", page_icon="🏃‍♂️")
+# st.set_page_config(page_title="Athlete Diet & Training — PPO", layout="wide", page_icon="🏃‍♂️")
 st.title("🏃‍♂️ Athlete Diet & Training (PPO) — Day-by-Day Animation")
 st.caption("This app loads your **final PPO model** and simulates days with animated metrics and actions.")
 
