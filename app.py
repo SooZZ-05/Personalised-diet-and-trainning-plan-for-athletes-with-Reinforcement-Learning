@@ -272,43 +272,49 @@ class AthleteEnvWrapper(gym.Wrapper):
 # Utilities
 # =============================
 @st.cache_resource(show_spinner=False)
-@st.cache_resource(show_spinner=False)
-def load_model_and_env(model_path: str, norm_path: str):
-    # Load PPO policy
+def load_model_and_env(model_path: str, norm_path: str | None = None):
     model = PPO.load(model_path, device="cpu")
 
-    # Rebuild the env stack the policy expects for inference
     def make_env():
-        # Same observation flattening/action space as training
         return AthleteEnvWrapper(AthleteEnv(render_mode=None))
 
     venv = DummyVecEnv([make_env])
 
-    # Load VecNormalize statistics (very important!)
-    if os.path.exists(norm_path):
+    # If you ever add stats later, this will pick them up
+    if norm_path and os.path.exists(norm_path):
         venv = VecNormalize.load(norm_path, venv)
-        venv.training = False       # do not update running stats
-        venv.norm_reward = False    # keep rewards unnormalized at test time
+        venv.training = False
+        venv.norm_reward = False
     else:
-        st.warning(f"VecNormalize stats not found: {norm_path}. "
-                   "Predictions may be off because observations aren’t normalized.")
+        # Pure DummyVecEnv path (your current case)
+        pass
 
     return model, venv
 
 def simulate_days(model, venv, days=30, seed=None):
     """
     Roll out a full episode deterministically with the PPO model
-    on a vectorized, VecNormalize-wrapped env. We log from the underlying
-    base AthleteEnv for human-readable metrics.
+    on a vectorized env. If VecNormalize is present, we still log from
+    the underlying base env for human-readable metrics.
     """
-    # Access the underlying single env for logging:
-    # venv -> DummyVecEnv -> AthleteEnvWrapper -> AthleteEnv
-    wrapper = venv.envs[0]          # AthleteEnvWrapper
-    base_env = wrapper.env          # AthleteEnv
+    # Unwrap VecNormalize -> DummyVecEnv
+    def _unwrap_venv(v):
+        while hasattr(v, "venv"):
+            v = v.venv
+        return v
+
+    underlying = _unwrap_venv(venv)
+    wrapper = underlying.envs[0]   # AthleteEnvWrapper
+    base_env = wrapper.env         # AthleteEnv
     base_env.episode_length = int(days)
 
-    # Reset vec env (returns shape (n_envs, obs_dim))
-    obs = venv.reset(seed=seed)
+    # Reset vec env; some versions accept seed, others don't
+    try:
+        obs = venv.reset(seed=seed)
+    except TypeError:
+        if seed is not None and hasattr(venv, "seed"):
+            venv.seed(seed)
+        obs = venv.reset()
 
     records = []
     seg_map = {0: "Morning", 1: "Midday", 2: "Evening"}
@@ -316,29 +322,22 @@ def simulate_days(model, venv, days=30, seed=None):
     ex_names = base_env.exercise_df['name'].to_dict()
 
     for t in range(days * 3):
-        # Log current segment *before* stepping
         seg = int(base_env.state["next_segment"])
         seg_name = seg_map[seg]
 
-        # Predict action (robust to shape)
         action, _ = model.predict(obs, deterministic=True)
         act0 = action if np.ndim(action) == 1 else action[0]
 
-        # Decode for logging
         meal = list(map(int, act0[:5]))
         exercise = int(act0[5])
         sleep_idx = int(act0[6])
         sleep_hours = float(wrapper.sleep_bins[sleep_idx])
 
-        # Step vec env
-        obs, reward, terminated, truncated, _ = venv.step(action)
+        # VecEnv returns 4 items
+        obs, rewards, dones, infos = venv.step(action)
+        r0 = float(rewards[0]) if np.ndim(rewards) else float(rewards)
+        done = bool(dones[0]) if np.ndim(dones) else bool(dones)
 
-        # VecEnv returns arrays
-        r0 = float(reward[0]) if np.ndim(reward) else float(reward)
-        done = (bool(terminated[0]) if np.ndim(terminated) else bool(terminated)) or \
-               (bool(truncated[0]) if np.ndim(truncated) else bool(truncated))
-
-        # Log from base_env
         records.append({
             "t": t,
             "day": (t // 3) + 1,
@@ -362,6 +361,7 @@ def simulate_days(model, venv, days=30, seed=None):
     return pd.DataFrame(records)
 
 
+
 # =============================
 # Streamlit UI
 # =============================
@@ -376,8 +376,8 @@ default_model_path = st.sidebar.text_input(
     help="Path to the *advanced* PPO model saved in the notebook."
 )
 default_norm_path = st.sidebar.text_input(
-    "VecNormalize stats (.pkl)", "ppo_advanced/vec_normalize.pkl",
-    help="Path to the VecNormalize statistics saved during training."
+    "VecNormalize stats (.pkl) — optional", "",
+    help="Leave blank if you didn't save VecNormalize during training."
 )
 
 uploaded = st.sidebar.file_uploader("...or upload PPO model (.zip)", type=["zip"])
@@ -388,8 +388,7 @@ if uploaded is not None:
     model_path = os.path.join("/tmp", uploaded.name)
     with open(model_path, "wb") as f:
         f.write(uploaded.getbuffer())
-
-norm_path = default_norm_path
+norm_path = default_norm_path.strip() or None
 if uploaded_norm is not None:
     norm_path = os.path.join("/tmp", uploaded_norm.name)
     with open(norm_path, "wb") as f:
@@ -454,7 +453,7 @@ fig1 = px.line(
 # highlight the current day instead of a single segment index
 cur_day = int(latest["day"])
 fig1.add_vrect(x0=cur_day - 0.5, x1=cur_day + 0.5, line_width=0, opacity=0.15)
-fig1.add_vline(x=st.session_state.frame, line_dash="dash")
+fig1.add_vline(x=cur_day, line_dash="dash")
 
 # Daily aggregation for calories
 daily = df.groupby("day", as_index=False).agg(
