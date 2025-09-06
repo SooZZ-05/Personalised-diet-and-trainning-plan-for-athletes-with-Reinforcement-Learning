@@ -639,7 +639,7 @@ with right:
         exercise_name=str(latest["exercise"])
     )
     if img_path and os.path.exists(img_path):
-        st.image(img_path, caption=img_caption, use_container_width=True)
+        st.image(img_path, caption=img_caption, use_column_width=True)
     else:
         # If images are in a different folder or loaded via URL, tweak ASSET_DIR or provide a URL here.
         pass
