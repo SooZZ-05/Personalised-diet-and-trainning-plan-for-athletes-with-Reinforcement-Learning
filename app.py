@@ -1,3 +1,5 @@
+# app.py
+# Streamlit animation for Athlete Diet & Training using FINAL PPO model (inference only)
 
 import os
 import time
@@ -6,15 +8,16 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-# --- Stable-Baselines3 / Gymnasium imports ---
+# ---- Stable-Baselines3 / Gymnasium imports ----
 try:
     import gymnasium as gym
     from gymnasium import spaces
     from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from stable_baselines3.common.monitor import Monitor
 except Exception as e:
-    st.error("Missing dependencies. Make sure requirements.txt is installed on Streamlit Cloud.")
+    st.error("Missing dependencies. Check requirements.txt on Streamlit Cloud.")
     st.stop()
 
 # =============================
@@ -26,12 +29,15 @@ class AthleteEnv(gym.Env):
         super().__init__()
         self.np_random = np.random.default_rng()
         self.render_mode = render_mode
+
         # Action space: Dict with 5 meal picks, 1 exercise, 1 sleep hour (0-12)
         self.action_space = spaces.Dict({
             "meal_choice": spaces.MultiDiscrete([25, 25, 25, 25, 25]),
             "exercise_choice": spaces.Discrete(10),
             "sleep_duration": spaces.Box(low=0.0, high=12.0, shape=(1,), dtype=np.float32)
         })
+
+        # Observation space
         self.observation_space = spaces.Dict({
             "gender": spaces.Discrete(2),
             "weight": spaces.Box(low=40.0, high=150.0, shape=(1,), dtype=np.float32),
@@ -44,13 +50,14 @@ class AthleteEnv(gym.Env):
             "days_since_rest": spaces.Discrete(10),
             "sleep_hours": spaces.Box(low=0.0, high=24.0, shape=(1,), dtype=np.float32),
             "day_of_cycle": spaces.Discrete(30),
-            "next_segment": spaces.Discrete(3)
+            "next_segment": spaces.Discrete(3),
         })
+
         self._define_food_data()
         self._define_exercise_data()
         self.state = None
         self.current_step_in_episode = 0
-        self.episode_length = 30
+        self.episode_length = 30  # days
         self.target_weight = None
 
     def _define_food_data(self):
@@ -165,7 +172,7 @@ class AthleteEnv(gym.Env):
         if segment_name == "evening" and state["sleep_hours"][0] >= 7.0: r += 40.0
         r -= abs(state["weight"][0] - self.target_weight) * 5.0
 
-        # calorie adherence (Mifflin-St Jeor style maintenance * activity_level)
+        # calorie adherence (Mifflin-St Jeor-ish maintenance * activity_level)
         if state["gender"][0] == 1:
             maintenance = 10*state["weight"][0] + 6.25*state["height"][0] - 5*state["age"][0] + 5
         else:
@@ -177,7 +184,10 @@ class AthleteEnv(gym.Env):
         return float(r)
 
     def step(self, action):
-        meal = action["meal_choice"]; exercise = action["exercise_choice"]; sleep = float(action["sleep_duration"][0])
+        meal = action["meal_choice"]
+        exercise = action["exercise_choice"]
+        sleep = float(action["sleep_duration"][0])
+
         seg = int(self.state["next_segment"])
         seg_name = {0:"morning",1:"midday",2:"evening"}[seg]
         ns = self._get_next_state_copy()
@@ -243,7 +253,6 @@ class AthleteEnvWrapper(gym.Wrapper):
             if typ == 'box':
                 flat.extend(np.array(v).flatten().tolist())
             else:
-                # ensure scalar
                 if hasattr(v, "item"):
                     flat.append(float(v.item()))
                 elif isinstance(v, (np.ndarray, list)):
@@ -273,42 +282,40 @@ class AthleteEnvWrapper(gym.Wrapper):
 # =============================
 @st.cache_resource(show_spinner=False)
 def load_model_and_env(model_path: str, norm_path: str | None = None):
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
     model = PPO.load(model_path, device="cpu")
 
     def make_env():
-        return AthleteEnvWrapper(AthleteEnv(render_mode=None))
+        # IMPORTANT: wrapper layout must match training-time layout
+        return Monitor(AthleteEnvWrapper(AthleteEnv(render_mode=None)))
 
     venv = DummyVecEnv([make_env])
 
-    # If you ever add stats later, this will pick them up
+    # If VecNormalize stats exist, load them and disable training normalization
     if norm_path and os.path.exists(norm_path):
         venv = VecNormalize.load(norm_path, venv)
         venv.training = False
         venv.norm_reward = False
-    else:
-        # Pure DummyVecEnv path (your current case)
-        pass
 
     return model, venv
 
+def _unwrap_venv(v):
+    while hasattr(v, "venv"):
+        v = v.venv
+    return v
+
 def simulate_days(model, venv, days=30, seed=None):
     """
-    Roll out a full episode deterministically with the PPO model
-    on a vectorized env. If VecNormalize is present, we still log from
-    the underlying base env for human-readable metrics.
+    Roll out a full episode deterministically with the PPO model.
     """
-    # Unwrap VecNormalize -> DummyVecEnv
-    def _unwrap_venv(v):
-        while hasattr(v, "venv"):
-            v = v.venv
-        return v
-
-    underlying = _unwrap_venv(venv)
-    wrapper = underlying.envs[0]   # AthleteEnvWrapper
-    base_env = wrapper.env         # AthleteEnv
+    underlying = _unwrap_venv(venv)     # -> DummyVecEnv
+    wrapper = underlying.envs[0]        # AthleteEnvWrapper
+    base_env = wrapper.env              # AthleteEnv
     base_env.episode_length = int(days)
 
-    # Reset vec env; some versions accept seed, others don't
+    # Reset vec env; use seed if available
     try:
         obs = venv.reset(seed=seed)
     except TypeError:
@@ -321,7 +328,8 @@ def simulate_days(model, venv, days=30, seed=None):
     food_names = base_env.food_df['name'].to_dict()
     ex_names = base_env.exercise_df['name'].to_dict()
 
-    for t in range(days * 3):
+    total_steps = days * 3
+    for t in range(total_steps):
         seg = int(base_env.state["next_segment"])
         seg_name = seg_map[seg]
 
@@ -333,7 +341,6 @@ def simulate_days(model, venv, days=30, seed=None):
         sleep_idx = int(act0[6])
         sleep_hours = float(wrapper.sleep_bins[sleep_idx])
 
-        # VecEnv returns 4 items
         obs, rewards, dones, infos = venv.step(action)
         r0 = float(rewards[0]) if np.ndim(rewards) else float(rewards)
         done = bool(dones[0]) if np.ndim(dones) else bool(dones)
@@ -360,24 +367,22 @@ def simulate_days(model, venv, days=30, seed=None):
 
     return pd.DataFrame(records)
 
-
-
 # =============================
 # Streamlit UI
 # =============================
-st.set_page_config(page_title="Athlete Diet & Training — PPO Simulator", layout="wide", page_icon="🏃‍♂️")
-
+st.set_page_config(page_title="Athlete Diet & Training — PPO", layout="wide", page_icon="🏃‍♂️")
 st.title("🏃‍♂️ Athlete Diet & Training (PPO) — Day-by-Day Animation")
-st.caption("Visualize the athlete's status after meals and training across days using the **final PPO model**.")
+st.caption("This app loads your **final PPO model** and simulates days with animated metrics and actions.")
 
+# Sidebar — model sources
 st.sidebar.header("Model")
 default_model_path = st.sidebar.text_input(
     "PPO model path (.zip)", "ppo_advanced/final_advanced_model.zip",
-    help="Path to the *advanced* PPO model saved in the notebook."
+    help="Path inside the repo to your saved SB3 PPO model."
 )
 default_norm_path = st.sidebar.text_input(
-    "VecNormalize stats (.pkl) — optional", "",
-    help="Leave blank if you didn't save VecNormalize during training."
+    "VecNormalize stats (.pkl) — optional", "ppo_advanced/vec_normalize.pkl",
+    help="If you saved VecNormalize during training, put the path here."
 )
 
 uploaded = st.sidebar.file_uploader("...or upload PPO model (.zip)", type=["zip"])
@@ -388,15 +393,18 @@ if uploaded is not None:
     model_path = os.path.join("/tmp", uploaded.name)
     with open(model_path, "wb") as f:
         f.write(uploaded.getbuffer())
+
 norm_path = default_norm_path.strip() or None
 if uploaded_norm is not None:
     norm_path = os.path.join("/tmp", uploaded_norm.name)
     with open(norm_path, "wb") as f:
         f.write(uploaded_norm.getbuffer())
+
 # Controls
 st.sidebar.header("Simulation")
 days = st.sidebar.slider("Days to simulate", min_value=7, max_value=60, value=30, step=1)
-seed = st.sidebar.number_input("Random seed (optional)", value=0, step=1)
+fixed_seed = st.sidebar.toggle("Use fixed seed", value=True)
+seed = st.sidebar.number_input("Seed value", value=0, step=1, disabled=not fixed_seed)
 run_btn = st.sidebar.button("Run Simulation")
 
 # Session state for animation
@@ -407,55 +415,49 @@ if "frame" not in st.session_state:
 if "playing" not in st.session_state:
     st.session_state.playing = False
 
+# Run simulation
 if run_btn:
-    model, venv = load_model_and_env(model_path, norm_path)
-    with st.spinner("Simulating..."):
-        st.session_state.df = simulate_days(
-            model, venv, days=days, seed=int(seed) if seed else None
-        )
-        st.session_state.frame = 0
-        st.session_state.playing = True
+    try:
+        model, venv = load_model_and_env(model_path, norm_path)
+        with st.spinner("Simulating with PPO (deterministic)..."):
+            st.session_state.df = simulate_days(
+                model, venv, days=days, seed=int(seed) if fixed_seed else None
+            )
+            st.session_state.frame = 0
+            st.session_state.playing = True
+    except Exception as e:
+        st.error(f"Failed to load or simulate: {e}")
 
 df = st.session_state.df
-if df is None:
-    st.info("Load your **final PPO model** and click **Run Simulation** to generate the animated visualization.")
+if df is None or df.empty:
+    st.info("Load your **PPO .zip** (and optional `VecNormalize`), then click **Run Simulation**.")
     st.stop()
 
 # =============================
 # Animated Dashboard
 # =============================
-# High-level KPI cards
+# KPIs for current frame
 latest = df.iloc[st.session_state.frame]
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Day", int(latest["day"]))
-col2.metric("Segment", latest["segment"])
-col3.metric("Weight (kg)", f"{latest['weight']:.2f}")
-col4.metric("Target (kg)", f"{latest['target_weight']:.2f}")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Day", int(latest["day"]))
+c2.metric("Segment", latest["segment"])
+c3.metric("Weight (kg)", f"{latest['weight']:.2f}")
+c4.metric("Target (kg)", f"{latest['target_weight']:.2f}")
 
-col5, col6, col7, col8 = st.columns(4)
-col5.metric("Calories Today", f"{latest['calories_today']:.0f}")
-col6.metric("Satiety", f"{latest['satiety']:.1f}")
-col7.metric("Fatigue /10", f"{latest['fatigue']:.1f}")
-col8.metric("Training streak (days)", int(latest["days_since_rest"]))
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("Calories Today", f"{latest['calories_today']:.0f}")
+c6.metric("Satiety", f"{latest['satiety']:.1f}")
+c7.metric("Fatigue /10", f"{latest['fatigue']:.1f}")
+c8.metric("Training streak (days)", int(latest["days_since_rest"]))
+st.metric("Sleep (h)", f"{latest['sleep_hours']:.1f}")
 
-col9, = st.columns(1)
-col9.metric("Sleep (h)", f"{latest['sleep_hours']:.1f}")
-
-# Plots (weight line, calories, fatigue/satiety)
-fig1 = px.line(
-    df,
-    x="day",
-    y="weight",
-    color="segment",
-    markers=True,
-    title="Weight over Time (by day & segment)",
-)
-# highlight the current day instead of a single segment index
+# Plots
+fig1 = px.line(df, x="day", y="weight", color="segment", markers=True,
+               title="Weight over Time (by day & segment)")
 cur_day = int(latest["day"])
 fig1.add_vrect(x0=cur_day - 0.5, x1=cur_day + 0.5, line_width=0, opacity=0.15)
 fig1.add_vline(x=cur_day, line_dash="dash")
 
-# Daily aggregation for calories
 daily = df.groupby("day", as_index=False).agg(
     weight=("weight","last"),
     calories_today=("calories_today","last"),
@@ -464,23 +466,18 @@ daily = df.groupby("day", as_index=False).agg(
 )
 fig2 = go.Figure()
 fig2.add_trace(go.Bar(x=daily["day"], y=daily["calories_today"], name="Calories Today"))
-fig2.add_trace(go.Scatter(x=daily["day"], y=daily["weight"], yaxis="y2", mode="lines+markers", name="Weight"))
+fig2.add_trace(go.Scatter(x=daily["day"], y=daily["weight"], yaxis="y2",
+                          mode="lines+markers", name="Weight"))
 fig2.update_layout(
     title="Daily Calories (bar) & Weight (line)",
     yaxis_title="Calories",
     yaxis2=dict(title="Weight (kg)", overlaying='y', side='right')
 )
 
-# fig3 = go.Figure()
-# fig3.add_trace(go.Scatter(x=df["t"], y=df["fatigue"], mode="lines", name="Fatigue"))
-# fig3.add_trace(go.Scatter(x=df["t"], y=df["satiety"], mode="lines", name="Satiety"))
-# fig3.update_layout(title="Fatigue and Satiety (per segment)", xaxis_title="t")
-
 fig3 = go.Figure()
 fig3.add_trace(go.Scatter(x=df["day"], y=df["fatigue"], mode="lines+markers", name="Fatigue"))
 fig3.add_trace(go.Scatter(x=df["day"], y=df["satiety"], mode="lines+markers", name="Satiety"))
-fig3.update_layout(title="Fatigue and Satiety (per day, 3 segments)", xaxis_title="day")
-
+fig3.update_layout(title="Fatigue and Satiety (per day, 3 segments)", xaxis_title="Day")
 
 left, right = st.columns([2,1])
 with left:
@@ -497,29 +494,37 @@ with right:
         st.write(f"**Sleep planned:** {latest['sleep_planned']:.1f} h")
     st.caption("Actions are decoded from PPO outputs for the current frame.")
 
+    # Export
+    st.download_button(
+        "Download simulation CSV",
+        df.to_csv(index=False).encode("utf-8"),
+        file_name="ppo_simulation.csv",
+        mime="text/csv",
+    )
+
 # Playback controls
 st.markdown("---")
-c1, c2, c3, c4 = st.columns([1,2,4,3])
-with c1:
+b1, b2, sld, b3 = st.columns([1,2,4,3])
+with b1:
     if st.button("⏮️ Restart"):
         st.session_state.frame = 0
-with c2:
+with b2:
     if st.session_state.playing:
         if st.button("⏸️ Pause"):
             st.session_state.playing = False
     else:
         if st.button("▶️ Play"):
             st.session_state.playing = True
+with sld:
+    st.session_state.frame = st.slider(
+        "Scrub timeline", 0, len(df)-1, st.session_state.frame, key="scrubber"
+    )
+with b3:
+    speed = st.selectbox("Speed", options=[0.05, 0.1, 0.25, 0.5], index=2,
+                         format_func=lambda x: f"{x}s/frame")
 
-with c3:
-    st.session_state.frame = st.slider("Scrub timeline", 0, len(df)-1, st.session_state.frame, key="scrubber")
-
-with c4:
-    speed = st.selectbox("Speed", options=[0.05, 0.1, 0.25, 0.5], index=2, format_func=lambda x: f"{x}s/frame")
-
-# Auto-advance animation using reruns
+# Auto-advance animation
 if st.session_state.playing:
-    next_frame = (st.session_state.frame + 1) % len(df)
-    st.session_state.frame = next_frame
+    st.session_state.frame = (st.session_state.frame + 1) % len(df)
     time.sleep(float(speed))
     st.rerun()
