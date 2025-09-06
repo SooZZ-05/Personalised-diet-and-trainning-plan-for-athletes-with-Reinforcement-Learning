@@ -16,21 +16,36 @@ IMG_60_SLEEP = os.path.join(ASSET_DIR, "60sleep.png")
 IMG_60_JOG   = os.path.join(ASSET_DIR, "60jog.png")
 
 def pick_frame_image(weight_kg: float, segment: str, exercise_name: str | None) -> tuple[str | None, str]:
-    """
-    Return (path, caption) for the current frame, or (None, "") if no image should be shown.
-    Rules:
-      - Evening -> sleep image
-      - Morning with a real exercise (not '-', 'None') -> jog image
-      - Midday -> no image
-    """
+    seg = (segment or "").strip().lower()
+    ex  = (exercise_name or "").strip().lower()
     high = (weight_kg >= THRESHOLD_KG)
-    if segment == "Evening":
+
+    if seg == "evening":
         return (IMG_90_SLEEP if high else IMG_60_SLEEP,
                 f"{'≥' if high else '<'}{int(THRESHOLD_KG)}kg • Sleep")
-    if segment == "Morning" and exercise_name and exercise_name not in ("-", "None"):
+
+    # morning jog only if it’s a real exercise (not '-' or 'none')
+    if seg == "morning" and ex not in ("-", "none"):
         return (IMG_90_JOG if high else IMG_60_JOG,
                 f"{'≥' if high else '<'}{int(THRESHOLD_KG)}kg • Jog ({exercise_name})")
+
     return (None, "")
+
+def _asset_check():
+    return {
+        IMG_90_SLEEP: os.path.exists(IMG_90_SLEEP),
+        IMG_90_JOG:   os.path.exists(IMG_90_JOG),
+        IMG_60_SLEEP: os.path.exists(IMG_60_SLEEP),
+        IMG_60_JOG:   os.path.exists(IMG_60_JOG),
+    }
+
+with st.sidebar.expander("🔧 Assets & Data Debug"):
+    for p, ok in _asset_check().items():
+        st.write(("✅" if ok else "❌"), p)
+    if "df" in st.session_state and isinstance(st.session_state.df, pd.DataFrame):
+        st.write("Segment counts:")
+        st.write(st.session_state.df["segment"].value_counts(dropna=False))
+
 
 # ---- Stable-Baselines3 / Gymnasium imports ----
 try:
