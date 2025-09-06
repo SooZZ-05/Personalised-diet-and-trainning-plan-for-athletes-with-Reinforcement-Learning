@@ -390,7 +390,10 @@ col5, col6, col7, col8 = st.columns(4)
 col5.metric("Calories Today", f"{latest['calories_today']:.0f}")
 col6.metric("Satiety", f"{latest['satiety']:.1f}")
 col7.metric("Fatigue /10", f"{latest['fatigue']:.1f}")
-col8.metric("Days since Rest", int(latest["days_since_rest"]))
+col8.metric("Training streak (days)", int(latest["days_since_rest"]))
+
+col9, = st.columns(1)
+col9.metric("Sleep (h)", f"{latest['sleep_hours']:.1f}")
 
 # Plots (weight line, calories, fatigue/satiety)
 fig1 = px.line(df, x="t", y="weight", title="Weight over Time (per segment)")
