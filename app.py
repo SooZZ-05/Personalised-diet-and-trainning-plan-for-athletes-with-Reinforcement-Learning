@@ -377,6 +377,82 @@ def simulate_days_simple(model, days=30, seed=None):
 
     return pd.DataFrame(records)
 
+def simulate_days(model, venv, days=30, seed=None):
+    """
+    Roll out a full episode deterministically with the PPO model.
+    Unwrap to get:
+      - base_env: AthleteEnv (for food_df, exercise_df, state, target_weight)
+      - wrapper: AthleteEnvWrapper (for sleep_bins)
+    """
+    inner = _unwrap_dummy(venv)          # -> DummyVecEnv
+    first_env = inner.envs[0]            # -> Monitor(AthleteEnvWrapper(AthleteEnv))
+    
+    wrapper = _unwrap_to(AthleteEnvWrapper, first_env)
+    base_env = _unwrap_to(AthleteEnv, first_env)
+    if base_env is None:
+        raise RuntimeError("Could not unwrap base AthleteEnv.")
+    
+    # ---- make absolutely sure ALL layers use the requested days ----
+    base_env.episode_length = int(days)
+    if wrapper is not None and hasattr(wrapper, "env"):
+        # wrapper.env is the base AthleteEnv
+        wrapper.env.episode_length = int(days)
+    
+    sleep_bins = wrapper.sleep_bins if wrapper is not None else np.linspace(0.0, 12.0, 13)
+    base_env.episode_length = int(days)
+
+    # Reset vec env with optional seed
+    try:
+        obs = venv.reset(seed=seed)
+    except TypeError:
+        if seed is not None and hasattr(venv, "seed"):
+            venv.seed(seed)
+        obs = venv.reset()
+
+    records = []
+    seg_map = {0: "Morning", 1: "Midday", 2: "Evening"}
+    food_names = base_env.food_df['name'].to_dict()
+    ex_names = base_env.exercise_df['name'].to_dict()
+
+    for t in range(days * 3):
+        seg = int(base_env.state["next_segment"])
+        seg_name = seg_map[seg]
+    
+        action, _ = model.predict(obs, deterministic=True)
+        act0 = action if np.ndim(action) == 1 else action[0]
+    
+        meal = list(map(int, act0[:5]))
+        exercise = int(act0[5])
+        sleep_idx = int(act0[6])
+        sleep_hours = float(sleep_bins[sleep_idx])
+    
+        obs, rewards, dones, infos = venv.step(action)
+        r0 = float(rewards[0]) if np.ndim(rewards) else float(rewards)
+        done = bool(dones[0]) if np.ndim(dones) else bool(dones)
+    
+        # If episode ended, vec env has already reset — don't log that reset frame
+        if done:
+            break
+    
+        records.append({
+            "t": t,
+            "day": (t // 3) + 1,
+            "segment": seg_name,
+            "weight": float(base_env.state["weight"][0]),
+            "calories_today": float(base_env.state["calories_today"][0]),
+            "satiety": float(base_env.state["satiety_level"][0]),
+            "fatigue": float(base_env.state["fatigue_level"][0]),
+            "sleep_hours": float(base_env.state["sleep_hours"][0]),
+            "days_since_rest": int(base_env.state["days_since_rest"]),
+            "reward": r0,
+            "meal_items": ", ".join([food_names[i+1] for i in meal]),
+            "exercise": ex_names[exercise+1] if seg_name == "Morning" else "-",
+            "sleep_planned": sleep_hours if seg_name == "Evening" else 0.0,
+            "target_weight": float(base_env.target_weight),
+        })
+
+    return pd.DataFrame(records)
+
 # =============================
 # Streamlit UI
 # =============================
