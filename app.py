@@ -320,6 +320,21 @@ def _unwrap_to(target_cls, root):
         seen.add(id(cur))
         cur = cur.env
 
+def _walk_env_chain(root):
+    """Yield root, root.env, root.env.env, ... until there's no deeper .env."""
+    cur = root
+    seen = set()
+    while cur is not None and id(cur) not in seen:
+        yield cur
+        seen.add(id(cur))
+        cur = getattr(cur, "env", None)
+
+def _find_in_chain(root, target_cls):
+    for node in _walk_env_chain(root):
+        if isinstance(node, target_cls):
+            return node
+    return None
+
 def simulate_days_simple(model, days=30, seed=None):
     """
     Deterministic rollout on a fresh, non-vectorized env (no auto-reset).
@@ -384,18 +399,20 @@ def simulate_days(model, venv, days=30, seed=None):
       - base_env: AthleteEnv (for food_df, exercise_df, state, target_weight)
       - wrapper: AthleteEnvWrapper (for sleep_bins)
     """
-    inner = _unwrap_dummy(venv)          # -> DummyVecEnv
-    first_env = inner.envs[0]            # -> Monitor(AthleteEnvWrapper(AthleteEnv))
+    inner = _unwrap_dummy(venv)         # DummyVecEnv
+    first_env = inner.envs[0]           # e.g. Monitor(AthleteEnvWrapper(AthleteEnv))
     
-    wrapper = _unwrap_to(AthleteEnvWrapper, first_env)
-    base_env = _unwrap_to(AthleteEnv, first_env)
+    wrapper  = _find_in_chain(first_env, AthleteEnvWrapper)
+    base_env = _find_in_chain(first_env, AthleteEnv)
+    
     if base_env is None:
-        raise RuntimeError("Could not unwrap base AthleteEnv.")
+        # show the chain to help debugging
+        chain_types = " -> ".join(type(n).__name__ for n in _walk_env_chain(first_env))
+        raise RuntimeError(f"Could not unwrap base AthleteEnv. Chain: {chain_types}")
     
-    # ---- make absolutely sure ALL layers use the requested days ----
+    # make sure the actual base receives the requested horizon
     base_env.episode_length = int(days)
     if wrapper is not None and hasattr(wrapper, "env"):
-        # wrapper.env is the base AthleteEnv
         wrapper.env.episode_length = int(days)
     
     sleep_bins = wrapper.sleep_bins if wrapper is not None else np.linspace(0.0, 12.0, 13)
@@ -500,17 +517,18 @@ if "frame" not in st.session_state:
     st.session_state.frame = 0
 if "playing" not in st.session_state:
     st.session_state.playing = False
-
+have_norm = bool(norm_path and os.path.exists(norm_path))
 if run_btn:
     try:
-        model, venv = load_model_and_env(model_path, norm_path)
+        model, venv = load_model_and_env(model_path, norm_path if have_norm else None)
         with st.spinner("Simulating with PPO (deterministic)..."):
-            if norm_path:  # you actually have VecNormalize stats
+            if have_norm:
+                # keep vec-env path only when we truly loaded VecNormalize stats
                 st.session_state.df = simulate_days(
                     model, venv, days=days, seed=int(seed) if fixed_seed else None
                 )
             else:
-                # simpler, robust path — guarantees exactly `days`
+                # robust, non-vectorized path — honors `days` exactly
                 st.session_state.df = simulate_days_simple(
                     model, days=days, seed=int(seed) if fixed_seed else None
                 )
