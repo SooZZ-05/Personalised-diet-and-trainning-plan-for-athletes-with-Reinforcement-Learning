@@ -396,7 +396,17 @@ col9, = st.columns(1)
 col9.metric("Sleep (h)", f"{latest['sleep_hours']:.1f}")
 
 # Plots (weight line, calories, fatigue/satiety)
-fig1 = px.line(df, x="t", y="weight", title="Weight over Time (per segment)")
+fig1 = px.line(
+    df,
+    x="day",
+    y="weight",
+    color="segment",
+    markers=True,
+    title="Weight over Time (by day & segment)",
+)
+# highlight the current day instead of a single segment index
+cur_day = int(latest["day"])
+fig1.add_vrect(x0=cur_day - 0.5, x1=cur_day + 0.5, line_width=0, opacity=0.15)
 fig1.add_vline(x=st.session_state.frame, line_dash="dash")
 
 # Daily aggregation for calories
@@ -415,10 +425,16 @@ fig2.update_layout(
     yaxis2=dict(title="Weight (kg)", overlaying='y', side='right')
 )
 
+# fig3 = go.Figure()
+# fig3.add_trace(go.Scatter(x=df["t"], y=df["fatigue"], mode="lines", name="Fatigue"))
+# fig3.add_trace(go.Scatter(x=df["t"], y=df["satiety"], mode="lines", name="Satiety"))
+# fig3.update_layout(title="Fatigue and Satiety (per segment)", xaxis_title="t")
+
 fig3 = go.Figure()
-fig3.add_trace(go.Scatter(x=df["t"], y=df["fatigue"], mode="lines", name="Fatigue"))
-fig3.add_trace(go.Scatter(x=df["t"], y=df["satiety"], mode="lines", name="Satiety"))
-fig3.update_layout(title="Fatigue and Satiety (per segment)", xaxis_title="t")
+fig3.add_trace(go.Scatter(x=df["day"], y=df["fatigue"], mode="lines+markers", name="Fatigue"))
+fig3.add_trace(go.Scatter(x=df["day"], y=df["satiety"], mode="lines+markers", name="Satiety"))
+fig3.update_layout(title="Fatigue and Satiety (per day, 3 segments)", xaxis_title="day")
+
 
 left, right = st.columns([2,1])
 with left:
