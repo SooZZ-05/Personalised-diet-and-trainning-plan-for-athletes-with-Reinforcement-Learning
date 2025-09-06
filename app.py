@@ -457,4 +457,4 @@ if st.session_state.playing:
     next_frame = (st.session_state.frame + 1) % len(df)
     st.session_state.frame = next_frame
     time.sleep(float(speed))
-    st.experimental_rerun()
+    st.rerun()
