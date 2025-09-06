@@ -393,28 +393,22 @@ def simulate_days_simple(model, days=30, seed=None):
     return pd.DataFrame(records)
 
 def simulate_days(model, venv, days=30, seed=None):
-    """
-    Roll out a full episode deterministically with the PPO model.
-    Unwrap to get:
-      - base_env: AthleteEnv (for food_df, exercise_df, state, target_weight)
-      - wrapper: AthleteEnvWrapper (for sleep_bins)
-    """
-    inner = _unwrap_dummy(venv)         # DummyVecEnv
-    first_env = inner.envs[0]           # e.g. Monitor(AthleteEnvWrapper(AthleteEnv))
-    
+    inner = _unwrap_dummy(venv)
+    first_env = inner.envs[0]
+
     wrapper  = _find_in_chain(first_env, AthleteEnvWrapper)
     base_env = _find_in_chain(first_env, AthleteEnv)
-    
+
     if base_env is None:
-        # show the chain to help debugging
         chain_types = " -> ".join(type(n).__name__ for n in _walk_env_chain(first_env))
+        # Return to caller so the run-block can fall back to simple rollout
         raise RuntimeError(f"Could not unwrap base AthleteEnv. Chain: {chain_types}")
-    
-    # make sure the actual base receives the requested horizon
+
+    # enforce horizon on the real base env
     base_env.episode_length = int(days)
     if wrapper is not None and hasattr(wrapper, "env"):
         wrapper.env.episode_length = int(days)
-    
+
     sleep_bins = wrapper.sleep_bins if wrapper is not None else np.linspace(0.0, 12.0, 13)
     base_env.episode_length = int(days)
 
@@ -518,25 +512,35 @@ if "frame" not in st.session_state:
 if "playing" not in st.session_state:
     st.session_state.playing = False
 have_norm = bool(norm_path and os.path.exists(norm_path))
+
 if run_btn:
     try:
+        # pass None to loader when we don't actually have stats
         model, venv = load_model_and_env(model_path, norm_path if have_norm else None)
         with st.spinner("Simulating with PPO (deterministic)..."):
             if have_norm:
-                # keep vec-env path only when we truly loaded VecNormalize stats
-                st.session_state.df = simulate_days(
-                    model, venv, days=days, seed=int(seed) if fixed_seed else None
-                )
+                try:
+                    # Try vec-env rollout (uses saved normalization)
+                    st.session_state.df = simulate_days(
+                        model, venv, days=days, seed=int(seed) if fixed_seed else None
+                    )
+                except Exception as e:
+                    # If anything about the unwrap/stack is odd, drop to safe path
+                    st.warning(f"VecNormalize path failed ({e}). Falling back to simple rollout.")
+                    st.session_state.df = simulate_days_simple(
+                        model, days=days, seed=int(seed) if fixed_seed else None
+                    )
             else:
-                # robust, non-vectorized path — honors `days` exactly
+                # Robust, non-vectorized path — always honors `days`
                 st.session_state.df = simulate_days_simple(
                     model, days=days, seed=int(seed) if fixed_seed else None
                 )
+
             st.session_state.frame = 0
             st.session_state.playing = True
     except Exception as e:
         st.error(f"Failed to load or simulate: {e}")
-
+        
 df = st.session_state.df
 if df is None or df.empty:
     st.info("Load your **PPO .zip** (and optional `VecNormalize`), then click **Run Simulation**.")
