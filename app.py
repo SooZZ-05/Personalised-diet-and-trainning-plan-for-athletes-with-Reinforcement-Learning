@@ -1,6 +1,3 @@
-# app.py
-# Streamlit animation for Athlete Diet & Training using FINAL PPO model (inference only)
-
 import os
 import time
 import numpy as np
@@ -172,7 +169,7 @@ class AthleteEnv(gym.Env):
         if segment_name == "evening" and state["sleep_hours"][0] >= 7.0: r += 40.0
         r -= abs(state["weight"][0] - self.target_weight) * 5.0
 
-        # calorie adherence (Mifflin-St Jeor-ish maintenance * activity_level)
+        # calorie adherence (maintenance * activity_level, simplified)
         if state["gender"][0] == 1:
             maintenance = 10*state["weight"][0] + 6.25*state["height"][0] - 5*state["age"][0] + 5
         else:
@@ -202,8 +199,6 @@ class AthleteEnv(gym.Env):
             ns["fatigue_level"] += fat
             if int(exercise) != 9: ns["days_since_rest"] += 1
             else: ns["days_since_rest"] = 0
-        else:
-            pass
 
         if seg_name == "evening":
             self._simulate_sleep_recovery(ns, sleep)
@@ -301,21 +296,49 @@ def load_model_and_env(model_path: str, norm_path: str | None = None):
 
     return model, venv
 
-def _unwrap_venv(v):
+def _unwrap_dummy(venv):
+    """Strip VecNormalize layers and return the inner DummyVecEnv."""
+    v = venv
     while hasattr(v, "venv"):
         v = v.venv
     return v
 
+def _unwrap_to(target_cls, root):
+    """
+    Walk .env links until we find an instance of `target_cls`.
+    Handles stacks like Monitor(AthleteEnvWrapper(AthleteEnv)).
+    """
+    cur = root
+    seen = set()
+    while True:
+        if isinstance(cur, target_cls):
+            return cur
+        if not hasattr(cur, "env"):
+            return None
+        if id(cur) in seen:
+            return None
+        seen.add(id(cur))
+        cur = cur.env
+
 def simulate_days(model, venv, days=30, seed=None):
     """
     Roll out a full episode deterministically with the PPO model.
+    Unwrap to get:
+      - base_env: AthleteEnv (for food_df, exercise_df, state, target_weight)
+      - wrapper: AthleteEnvWrapper (for sleep_bins)
     """
-    underlying = _unwrap_venv(venv)     # -> DummyVecEnv
-    wrapper = underlying.envs[0]        # AthleteEnvWrapper
-    base_env = wrapper.env              # AthleteEnv
+    inner = _unwrap_dummy(venv)          # -> DummyVecEnv
+    first_env = inner.envs[0]            # -> Monitor(AthleteEnvWrapper(AthleteEnv))
+
+    wrapper = _unwrap_to(AthleteEnvWrapper, first_env)
+    base_env = _unwrap_to(AthleteEnv, first_env)
+    if base_env is None:
+        raise RuntimeError("Could not unwrap base AthleteEnv.")
+    sleep_bins = wrapper.sleep_bins if wrapper is not None else np.linspace(0.0, 12.0, 13)
+
     base_env.episode_length = int(days)
 
-    # Reset vec env; use seed if available
+    # Reset vec env with optional seed
     try:
         obs = venv.reset(seed=seed)
     except TypeError:
@@ -328,8 +351,7 @@ def simulate_days(model, venv, days=30, seed=None):
     food_names = base_env.food_df['name'].to_dict()
     ex_names = base_env.exercise_df['name'].to_dict()
 
-    total_steps = days * 3
-    for t in range(total_steps):
+    for t in range(days * 3):
         seg = int(base_env.state["next_segment"])
         seg_name = seg_map[seg]
 
@@ -339,7 +361,7 @@ def simulate_days(model, venv, days=30, seed=None):
         meal = list(map(int, act0[:5]))
         exercise = int(act0[5])
         sleep_idx = int(act0[6])
-        sleep_hours = float(wrapper.sleep_bins[sleep_idx])
+        sleep_hours = float(sleep_bins[sleep_idx])
 
         obs, rewards, dones, infos = venv.step(action)
         r0 = float(rewards[0]) if np.ndim(rewards) else float(rewards)
@@ -436,7 +458,6 @@ if df is None or df.empty:
 # =============================
 # Animated Dashboard
 # =============================
-# KPIs for current frame
 latest = df.iloc[st.session_state.frame]
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Day", int(latest["day"]))
@@ -494,7 +515,6 @@ with right:
         st.write(f"**Sleep planned:** {latest['sleep_planned']:.1f} h")
     st.caption("Actions are decoded from PPO outputs for the current frame.")
 
-    # Export
     st.download_button(
         "Download simulation CSV",
         df.to_csv(index=False).encode("utf-8"),
