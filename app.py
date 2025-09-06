@@ -6,6 +6,32 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- image assets ---
+ASSET_DIR = "."  # change to "assets" if you put images in ./assets
+THRESHOLD_KG = 75.0  # >=75 uses the "90" images; <75 uses the "60" images
+
+IMG_90_SLEEP = os.path.join(ASSET_DIR, "90sleep.png")
+IMG_90_JOG   = os.path.join(ASSET_DIR, "90jog.png")
+IMG_60_SLEEP = os.path.join(ASSET_DIR, "60sleep.png")
+IMG_60_JOG   = os.path.join(ASSET_DIR, "60jog.png")
+
+def pick_frame_image(weight_kg: float, segment: str, exercise_name: str | None) -> tuple[str | None, str]:
+    """
+    Return (path, caption) for the current frame, or (None, "") if no image should be shown.
+    Rules:
+      - Evening -> sleep image
+      - Morning with a real exercise (not '-', 'None') -> jog image
+      - Midday -> no image
+    """
+    high = (weight_kg >= THRESHOLD_KG)
+    if segment == "Evening":
+        return (IMG_90_SLEEP if high else IMG_60_SLEEP,
+                f"{'≥' if high else '<'}{int(THRESHOLD_KG)}kg • Sleep")
+    if segment == "Morning" and exercise_name and exercise_name not in ("-", "None"):
+        return (IMG_90_JOG if high else IMG_60_JOG,
+                f"{'≥' if high else '<'}{int(THRESHOLD_KG)}kg • Jog ({exercise_name})")
+    return (None, "")
+
 # ---- Stable-Baselines3 / Gymnasium imports ----
 try:
     import gymnasium as gym
@@ -605,6 +631,18 @@ with right:
     if latest['segment'] == "Evening":
         st.write(f"**Sleep planned:** {latest['sleep_planned']:.1f} h")
     st.caption("Actions are decoded from PPO outputs for the current frame.")
+
+    # <<< NEW: animated image >>>
+    img_path, img_caption = pick_frame_image(
+        weight_kg=float(latest["weight"]),
+        segment=str(latest["segment"]),
+        exercise_name=str(latest["exercise"])
+    )
+    if img_path and os.path.exists(img_path):
+        st.image(img_path, caption=img_caption, use_container_width=True)
+    else:
+        # If images are in a different folder or loaded via URL, tweak ASSET_DIR or provide a URL here.
+        pass
 
     st.download_button(
         "Download simulation CSV",
