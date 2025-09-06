@@ -282,6 +282,7 @@ def load_model(model_path: str):
 def simulate_days(model, days=30, seed=None):
     """Rollout a full episode deterministically using the PPO model"""
     base_env = AthleteEnv(render_mode=None)
+    base_env.episode_length = int(days)
     env = AthleteEnvWrapper(base_env)
     if seed is not None:
         np.random.seed(seed)
@@ -294,6 +295,7 @@ def simulate_days(model, days=30, seed=None):
 
     for t in range(days*3):
         action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(action)
         # decode for logging
         meal = list(map(int, action[:5]))
         exercise = int(action[5])
@@ -323,7 +325,8 @@ def simulate_days(model, days=30, seed=None):
             "target_weight": float(base_env.target_weight),
         }
         records.append(row)
-        if truncated: break
+        if truncated: 
+            break
     df = pd.DataFrame(records)
     return df
 
