@@ -329,13 +329,19 @@ def simulate_days(model, venv, days=30, seed=None):
     """
     inner = _unwrap_dummy(venv)          # -> DummyVecEnv
     first_env = inner.envs[0]            # -> Monitor(AthleteEnvWrapper(AthleteEnv))
-
+    
     wrapper = _unwrap_to(AthleteEnvWrapper, first_env)
     base_env = _unwrap_to(AthleteEnv, first_env)
     if base_env is None:
         raise RuntimeError("Could not unwrap base AthleteEnv.")
+    
+    # ---- make absolutely sure ALL layers use the requested days ----
+    base_env.episode_length = int(days)
+    if wrapper is not None and hasattr(wrapper, "env"):
+        # wrapper.env is the base AthleteEnv
+        wrapper.env.episode_length = int(days)
+    
     sleep_bins = wrapper.sleep_bins if wrapper is not None else np.linspace(0.0, 12.0, 13)
-
     base_env.episode_length = int(days)
 
     # Reset vec env with optional seed
@@ -354,19 +360,23 @@ def simulate_days(model, venv, days=30, seed=None):
     for t in range(days * 3):
         seg = int(base_env.state["next_segment"])
         seg_name = seg_map[seg]
-
+    
         action, _ = model.predict(obs, deterministic=True)
         act0 = action if np.ndim(action) == 1 else action[0]
-
+    
         meal = list(map(int, act0[:5]))
         exercise = int(act0[5])
         sleep_idx = int(act0[6])
         sleep_hours = float(sleep_bins[sleep_idx])
-
+    
         obs, rewards, dones, infos = venv.step(action)
         r0 = float(rewards[0]) if np.ndim(rewards) else float(rewards)
         done = bool(dones[0]) if np.ndim(dones) else bool(dones)
-
+    
+        # If episode ended, vec env has already reset — don't log that reset frame
+        if done:
+            break
+    
         records.append({
             "t": t,
             "day": (t // 3) + 1,
@@ -383,9 +393,6 @@ def simulate_days(model, venv, days=30, seed=None):
             "sleep_planned": sleep_hours if seg_name == "Evening" else 0.0,
             "target_weight": float(base_env.target_weight),
         })
-
-        if done:
-            break
 
     return pd.DataFrame(records)
 
