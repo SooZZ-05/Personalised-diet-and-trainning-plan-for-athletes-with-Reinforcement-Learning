@@ -15,6 +15,9 @@ IMG_90_JOG   = os.path.join(ASSET_DIR, "90jog.png")
 IMG_60_SLEEP = os.path.join(ASSET_DIR, "60sleep.png")
 IMG_60_JOG   = os.path.join(ASSET_DIR, "60jog.png")
 
+st.set_page_config(page_title="Athlete Diet & Training — PPO",
+                   layout="wide", page_icon="🏃‍♂️")
+
 def pick_frame_image(weight_kg: float, segment: str, exercise_name: str | None) -> tuple[str | None, str]:
     seg = (segment or "").strip().lower()
     ex  = (exercise_name or "").strip().lower()
